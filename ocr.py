@@ -2,40 +2,37 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from pathlib import Path
 from typing import Any
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
 MODEL_NAME = "qwen2.5vl:3b"
 OLLAMA_URL = "http://localhost:11434/api/generate"
 
-_RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "records": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "date": {"type": "string"},
-                    "name": {"type": "string"},
-                    "action": {"type": "string"},
-                },
-                "required": ["date", "name", "action"],
-            },
-        }
-    },
-    "required": ["records"],
-}
-
 
 class OcrError(Exception):
     """An expected problem while communicating with the local OCR model."""
 
 
+def normalize_date(value: str) -> str:
+    value = value.strip()
+    dash = r"[-‐‑–—−]"
+    if re.fullmatch(rf"(?:{dash}\s*)+", value):
+        return ""
+    iso = re.fullmatch(rf"(\d{{4}})\s*{dash}\s*(\d{{1,2}})\s*{dash}\s*(\d{{1,2}})", value)
+    if iso:
+        year, month, day = iso.groups()
+        return f"{day}/{month}/{year}"
+    return re.sub(rf"(?<=[0-9xX?])\s*{dash}\s*(?=[0-9xX?])", "/", value)
+
+
 def parse_model_response(response: str) -> list[dict[str, str]]:
+    response = response.strip()
+    if response.startswith(("```json\n", "```\n")) and response.endswith("```"):
+        response = response.split("\n", 1)[1][:-3]
     try:
         payload: Any = json.loads(response)
     except json.JSONDecodeError as exc:
@@ -51,6 +48,7 @@ def parse_model_response(response: str) -> list[dict[str, str]]:
         values = [record.get(field) for field in ("date", "name", "action")]
         if not all(isinstance(value, str) for value in values):
             raise OcrError(f"La ligne {index} ne contient pas trois champs texte valides.")
+        values[0] = normalize_date(values[0])
         records.append(dict(zip(("date", "name", "action"), values)))
     return records
 
@@ -60,27 +58,42 @@ class LocalOcr:
         self.model = model
         self.endpoint = endpoint
 
-    def extract(self, image_path: Path) -> list[dict[str, str]]:
+    def extract(self, image_path: Path, *, prompt: str | None = None) -> list[dict[str, str]]:
         try:
             encoded_image = base64.b64encode(image_path.read_bytes()).decode("ascii")
         except OSError as exc:
             raise OcrError(f"Impossible de lire l'image : {exc}") from exc
 
-        prompt = (
+        prompt = prompt or (
             "Lis cette photo d'un registre manuscrit en français. "
             "Extrais toutes les lignes visibles du tableau principal dans l'ordre. "
-            "Le tableau comporte les colonnes date, nom et action. "
-            "Ignore les titres de colonnes et le texte d'une page voisine si elle apparaît. "
-            "N'invente jamais une information : si un champ est illisible ou absent, "
-            "renvoie une chaîne vide pour ce champ. Conserve le texte tel qu'il est écrit."
+            "Les en-têtes « Quand ? », « Qui ? » et « Quoi ? » correspondent "
+            "respectivement à la date, au nom et prénom, et à l'action. "
+            "Une intervention peut occuper plusieurs lignes manuscrites : rattache "
+            "la suite du texte à la même action. "
+            "Ignore les en-têtes, les numéros de page et les fragments d'une page voisine. "
+            "Dans l'action, transcris aussi les fragments lisibles, même s'il ne reste "
+            "qu'un mot ou une abréviation. Conserve particulièrement les noms des pièces "
+            "de vélo que tu arrives à lire, même si la phrase est incomplète. "
+            "Laisse une action vide uniquement si elle est absente ou si aucun fragment "
+            "n'est lisible. Laisse aussi vides les dates et les noms absents ou illisibles. "
+            "N'invente rien et conserve le texte visible tel qu'il est écrit. "
+            'Réponds uniquement en JSON, au format '
+            '{"records":[{"date":"", "name":"", "action":""}]}.'
         )
         request_body = {
             "model": self.model,
             "prompt": prompt,
             "images": [encoded_image],
             "stream": False,
-            "format": _RESPONSE_SCHEMA,
-            "options": {"temperature": 0},
+            # The installed GPU runner failed to generate text for the sample image.
+            "options": {
+                "temperature": 0.2,
+                "seed": 42,
+                "num_ctx": 8192,
+                "repeat_penalty": 1.1,
+                "num_gpu": 0,
+            },
         }
         request = Request(
             self.endpoint,
@@ -92,10 +105,24 @@ class LocalOcr:
         try:
             with urlopen(request, timeout=600) as response:
                 result: Any = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            try:
+                details = json.loads(exc.read().decode("utf-8")).get("error", "")
+            except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+                details = ""
+            if "model" in details.lower() and "not found" in details.lower():
+                raise OcrError(
+                    f"Le modèle OCR « {self.model} » n'est pas installé. "
+                    f"Dans un terminal, exécutez : ollama pull {self.model}"
+                ) from exc
+            message = f"Erreur Ollama (HTTP {exc.code})"
+            if details:
+                message += f" : {details}"
+            raise OcrError(message) from exc
         except URLError as exc:
             raise OcrError(
-                "Impossible de joindre Ollama en local. Vérifiez qu'Ollama est installé "
-                "et démarré, puis réessayez."
+                f"Impossible de joindre Ollama à {self.endpoint}. "
+                "Vérifiez qu'Ollama est démarré et réessayez."
             ) from exc
         except TimeoutError as exc:
             raise OcrError("Le traitement a dépassé le délai d'attente.") from exc
@@ -104,4 +131,11 @@ class LocalOcr:
 
         if not isinstance(result, dict) or not isinstance(result.get("response"), str):
             raise OcrError("La réponse d'Ollama ne contient pas le résultat OCR attendu.")
-        return parse_model_response(result["response"])
+        response_text = result["response"].strip()
+        if not response_text or result.get("done") is False:
+            raise OcrError(
+                "Ollama n'a pas terminé la reconnaissance et n'a renvoyé aucun texte. "
+                "Le modèle local peut être en difficulté avec cette écriture ou cette photo. "
+                "Essayez une photo nette, cadrée sur une seule page, puis relancez le traitement."
+            )
+        return parse_model_response(response_text)

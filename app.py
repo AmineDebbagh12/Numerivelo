@@ -9,16 +9,17 @@ from tkinter import filedialog, messagebox, ttk
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 
-from ocr import LocalOcr, OcrError
+from charts import ChartWindow, DIMENSIONS
+from ocr import LocalOcr, OcrError, normalize_date
 
 SUPPORTED_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
-FIELDS = ("Date", "Nom", "Action")
+FIELDS = DIMENSIONS
 
 
 class OcrExcelApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("Registre manuscrit vers Excel")
+        self.root.title("Registre manuscrit")
         self.root.geometry("1000x620")
         self.image_paths: list[Path] = []
         self.events: queue.Queue[tuple] = queue.Queue()
@@ -61,7 +62,7 @@ class OcrExcelApp:
         self.table = ttk.Treeview(table_frame, columns=("date", "name", "action"), show="headings")
         for key, title, width in (
             ("date", "Date", 150),
-            ("name", "Nom", 220),
+            ("name", FIELDS[1], 220),
             ("action", "Action", 560),
         ):
             self.table.heading(key, text=title)
@@ -82,6 +83,10 @@ class OcrExcelApp:
             controls, text="Exporter vers Excel…", command=self._export, state="disabled"
         )
         self.export_button.pack(side="right")
+        self.chart_button = ttk.Button(
+            controls, text="Visualiser les données…", command=self._show_charts, state="disabled"
+        )
+        self.chart_button.pack(side="right", padx=(0, 8))
 
         status_row = ttk.Frame(container)
         status_row.grid(row=4, column=0, sticky="ew", pady=(10, 0))
@@ -123,7 +128,7 @@ class OcrExcelApp:
         self.is_processing = True
         self.process_button.configure(state="disabled")
         self.folder_button.configure(state="disabled")
-        self.export_button.configure(state="disabled")
+        self._update_data_buttons()
         self.progress.configure(maximum=len(self.image_paths), value=0)
         self.status_var.set("Traitement local en cours…")
         self._clear_table()
@@ -166,8 +171,7 @@ class OcrExcelApp:
         self.is_processing = False
         self.process_button.configure(state="normal" if self.image_paths else "disabled")
         self.folder_button.configure(state="normal")
-        has_rows = bool(self.table.get_children())
-        self.export_button.configure(state="normal" if has_rows else "disabled")
+        self._update_data_buttons()
         if failures:
             self.status_var.set(f"Terminé avec {len(failures)} erreur(s)")
             messagebox.showwarning(
@@ -201,11 +205,13 @@ class OcrExcelApp:
         def save_edit(_event: tk.Event | None = None) -> None:
             if not editor.winfo_exists():
                 return
-            values = list(self.table.item(row_id, "values"))
-            values[column_index] = editor.get()
-            self.table.item(row_id, values=values)
+            if self.table.exists(row_id):
+                values = list(self.table.item(row_id, "values"))
+                value = editor.get()
+                values[column_index] = normalize_date(value) if column_index == 0 else value
+                self.table.item(row_id, values=values)
             editor.destroy()
-            self.export_button.configure(state="normal")
+            self._update_data_buttons()
 
         editor.bind("<Return>", save_edit)
         editor.bind("<FocusOut>", save_edit)
@@ -213,7 +219,7 @@ class OcrExcelApp:
 
     def _add_row(self) -> None:
         self.table.insert("", "end", values=("", "", ""))
-        self.export_button.configure(state="normal")
+        self._update_data_buttons()
 
     def _delete_rows(self) -> None:
         selected = self.table.selection()
@@ -221,16 +227,28 @@ class OcrExcelApp:
             return
         for row_id in selected:
             self.table.delete(row_id)
-        self.export_button.configure(
-            state="normal" if self.table.get_children() else "disabled"
-        )
+        self._update_data_buttons()
 
     def _clear_table(self) -> None:
         for row_id in self.table.get_children():
             self.table.delete(row_id)
 
+    def _rows(self) -> list[tuple[str, ...]]:
+        return [
+            tuple(self.table.set(row_id, field) for field in self.table["columns"])
+            for row_id in self.table.get_children()
+        ]
+
+    def _update_data_buttons(self) -> None:
+        state = "normal" if not self.is_processing and self.table.get_children() else "disabled"
+        self.export_button.configure(state=state)
+        self.chart_button.configure(state=state)
+
+    def _show_charts(self) -> None:
+        ChartWindow(self.root, self._rows())
+
     def _export(self) -> None:
-        rows = [self.table.item(row_id, "values") for row_id in self.table.get_children()]
+        rows = self._rows()
         if not rows:
             messagebox.showwarning("Aucune donnée", "Il n'y a aucune ligne à exporter.")
             return
@@ -249,8 +267,9 @@ class OcrExcelApp:
         sheet.append(FIELDS)
         for cell in sheet[1]:
             cell.font = Font(bold=True)
-        for row in rows:
-            sheet.append(list(row))
+        for row_number, row in enumerate(rows, start=2):
+            for column, value in enumerate(row, start=1):
+                sheet.cell(row_number, column, value).data_type = "s"
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
         sheet.column_dimensions["A"].width = 16

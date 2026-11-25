@@ -20,8 +20,6 @@ class OcrError(Exception):
 def normalize_date(value: str) -> str:
     value = value.strip()
     dash = r"[-‐‑–—−]"
-    if re.fullmatch(rf"(?:{dash}\s*)+", value):
-        return ""
     iso = re.fullmatch(rf"(\d{{4}})\s*{dash}\s*(\d{{1,2}})\s*{dash}\s*(\d{{1,2}})", value)
     if iso:
         year, month, day = iso.groups()
@@ -76,7 +74,10 @@ class LocalOcr:
             "qu'un mot ou une abréviation. Conserve particulièrement les noms des pièces "
             "de vélo que tu arrives à lire, même si la phrase est incomplète. "
             "Laisse une action vide uniquement si elle est absente ou si aucun fragment "
-            "n'est lisible. Laisse aussi vides les dates et les noms absents ou illisibles. "
+            "n'est lisible. Pour une date partiellement lisible, conserve les chiffres "
+            "et les marques visibles dans leur position, sans compléter la date "
+            "(par exemple 17/?/26 si le mois est illisible). "
+            "Laisse vides les dates et les noms absents ou entièrement illisibles. "
             "N'invente rien et conserve le texte visible tel qu'il est écrit. "
             'Réponds uniquement en JSON, au format '
             '{"records":[{"date":"", "name":"", "action":""}]}.'
@@ -86,6 +87,8 @@ class LocalOcr:
             "prompt": prompt,
             "images": [encoded_image],
             "stream": False,
+            # Reusing the previous image's cached context can change row coverage.
+            "keep_alive": 0,
             # The installed GPU runner failed to generate text for the sample image.
             "options": {
                 "temperature": 0.2,

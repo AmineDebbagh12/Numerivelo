@@ -27,7 +27,7 @@ class ParseModelResponseTests(unittest.TestCase):
             '{"date":"17 – x – 26","name":"Lou","action":""},'
             '{"date":"—","name":"Jo","action":"pneu"}]}'
         )
-        self.assertEqual([row["date"] for row in records], ["12/11/2026", "17/x/26", ""])
+        self.assertEqual([row["date"] for row in records], ["12/11/2026", "17/x/26", "—"])
         self.assertEqual([row["action"] for row in records], ["frn-?", "", "pneu"])
 
     def test_rejects_missing_records(self) -> None:

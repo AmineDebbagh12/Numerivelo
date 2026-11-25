@@ -38,7 +38,7 @@ Prérequis : Python 3.10 ou plus récent avec Tkinter, et [Ollama](https://ollam
 
 À chaque nouvelle ouverture du terminal, réactivez l'environnement avant de lancer le programme avec `source .venv/bin/activate`.
 
-Le modèle est téléchargé uniquement à l'étape 1. Après cela, le logiciel traite les images localement, sans connexion à un service OCR distant. Le traitement utilise le processeur et peut prendre du temps selon l'ordinateur.
+Le modèle est téléchargé uniquement à l'étape 1. Après cela, le logiciel traite les images localement, sans connexion à un service OCR distant. Le traitement utilise le processeur. Ollama libère le modèle après chaque image pour éviter que la réutilisation du contexte de lecture fasse varier le nombre de lignes détectées. Le rechargement du modèle peut ralentir le traitement d'un lot.
 
 ## Utilisation
 
